@@ -141,8 +141,9 @@ st.sidebar.markdown(
 rows = sorted(df["row_id"].unique())
 counts = df.groupby("row_id")["address"].nunique()
 st.subheader("Warehouse plan")
+st.caption("Number of occupied slots in each row")
 for col, r in zip(st.columns(len(rows)), rows):
-    col.metric(r, f"{counts[r]} slots")
+    col.metric(r, int(counts[r]))
 
 default = first_row or ("K-008" if "K-008" in rows else rows[0])
 current = st.radio("Row", rows, index=rows.index(default), horizontal=True)
