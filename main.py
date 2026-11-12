@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -6,7 +8,7 @@ LEVELS = 6
 SLOT_DX = {"a": -0.3, "b": 0.0, "c": 0.3}
 EMPTY_FILL, EMPTY_LINE = "#d9dee4", "#98a3af"
 FALLBACK_COLOR = "#8a8f95"
-PRODUCTS = {
+PRODUCTS = {  # code:(name, color) streamlit run main.py
     "2261410A": ("Pritt Color Stick Orange 15000×10g", "#e07b2c"),
     "1173983": ("ACCO PP STATICMIXER INJECTION", "#7a5fc4"),
     "2675905": ("PKU6K Pritt Stick 8300×22g UK", "#2a8f6f"),
@@ -28,12 +30,12 @@ PRITT_STICK = (
 COLUMN_NAMES = {"address": "Location", "code": "Item code", "name": "Product",
                 "qty": "Quantity (pcs)", "doc": "Document", "batch": "Batch"}
 
-
-MAX_SLOT_KG = 750
-HORIZON_DAYS = 84  # 12 weeks ahead
-ROW_STEP_M, COL_STEP_M, LEVEL_STEP_M = 3.5, 2.8, 1.3  # assumptions
-DOCK_ROW, DOCK_COL = 2, 16
-ZONE_ROWS = {}
+# --- placement rules (CHECK THESE VALUES WITH THE WAREHOUSE) ---
+MAX_SLOT_KG = 750  # assumed 750 kg per slot
+HORIZON_DAYS = 84  # orders are planned 12 weeks ahead
+ROW_STEP_M, COL_STEP_M, LEVEL_STEP_M = 3.5, 2.8, 1.3  # row spacing and level height are assumptions
+DOCK_ROW, DOCK_COL = 2, 16  # CHANGE: row and column next to the buffer / dispatch area
+ZONE_ROWS = {}  # e.g. {"food": ["K-010", "K-011"]}; empty means no restriction
 ALLERGEN_LIST = ["soy", "nuts", "milk", "gluten", "eggs"]
 TYPES = ["industry", "food", "chemical", "packaging", "other"]
 
@@ -186,13 +188,22 @@ st.title("Warehouse")
 
 df = load_pallets()
 q = st.sidebar.text_input("Search", placeholder="location, batch, item code or product name").strip().lower()
+ADDR_RE = re.compile(r"^[a-z]-\d{3}-\d{3}-\d{3}-[abc]$")  # e.g. k-006-026-002-a
 hits, found, first_row = set(), pd.DataFrame(), None
 if q:
     hay = (df["address"] + " " + df["code"] + " " + df["name"] + " " + df["batch"]).str.lower()
     found = df[hay.str.contains(q, regex=False)]
     hits = set(found["address"])
     first_row = found["row_id"].iloc[0] if len(found) else None
-    st.sidebar.write(f"Slots found: {len(hits)}" if hits else "Nothing found")
+    if hits:
+        st.sidebar.write(f"Slots found: {len(hits)}")
+    elif ADDR_RE.match(q) and (q[0].upper() + q[1:5]) in set(df["row_id"]):
+        # an empty slot has no pallet, so it is not in the data: find it by its address
+        hits = {q[0].upper() + q[1:]}
+        first_row = q[0].upper() + q[1:5]
+        st.sidebar.write("This slot is empty (no pallet stored here)")
+    else:
+        st.sidebar.write("Nothing found")
 
 st.sidebar.markdown("**Legend**")
 for code, (name, color) in PRODUCTS.items():
@@ -216,6 +227,9 @@ default = first_row or ("K-008" if "K-008" in rows else rows[0])
 current = st.radio("Row", rows, index=rows.index(default), horizontal=True)
 sub = df[df["row_id"] == current]
 lo, hi = max(1, sub["bay"].min() - 2), sub["bay"].max() + 2
+hit_cols = [int(a.split("-")[2]) for a in hits if a.startswith(current + "-")]
+if hit_cols:  # make sure a searched slot is inside the drawn columns
+    lo, hi = max(1, min(lo, min(hit_cols) - 1)), max(hi, max(hit_cols) + 1)
 total = (hi - lo + 1) * LEVELS * 3
 occupied = sub["address"].nunique()
 st.caption(f"Row {current}, columns {lo}–{hi}. Occupied {occupied} of {total} slots ({occupied / total:.0%}). "
@@ -225,6 +239,8 @@ key = f"rack_{current}"
 state = st.session_state.get(key)
 points = (state.get("selection") or {}).get("points", []) if state else []
 picked = address_from_click(current, points[0]["x"], points[0]["y"]) if points else None
+if picked is None and len(hits) == 1:  # searching one address opens its details
+    picked = next(iter(hits))
 
 st.plotly_chart(rack_figure(sub, current, lo, hi, hits, picked), key=key,
                 on_select="rerun", selection_mode="points", width="stretch")
@@ -242,21 +258,21 @@ if picked:
     else:
         st.info("This slot is empty.")
 
-if hits:
+if len(found):
     st.subheader("Search results")
     st.dataframe(found[list(COLUMN_NAMES)].rename(columns=COLUMN_NAMES).replace({"Batch": {"": "no data"}}),
                  hide_index=True, width="stretch")
 
 st.subheader("New product: quick questionnaire")
-with st.form("new_product"):
-    new_code = st.text_input("Item code")
-    weight = st.number_input("Weight of one pallet (kg)", min_value=0.0, value=500.0)
-    ptype = st.selectbox("Type of product", TYPES)
+new_code = st.text_input("Item code")
+ptype = st.selectbox("Type of product", TYPES)
+weight = st.number_input("Weight of one pallet (kg)", min_value=0.0, value=500.0)
+allergens = []
+if ptype == "food":  # allergens matter only for food
     allergens = st.multiselect("Contains allergens", ALLERGEN_LIST)
-    pallets = st.number_input("Number of pallets", min_value=1, value=1, step=1)
-    days = st.number_input("Days until production", min_value=0, value=30, step=1)
-    submitted = st.form_submit_button("Suggest slots")
-if submitted:
+pallets = st.number_input("Number of pallets", min_value=1, value=1, step=1)
+days = st.number_input("Days until production", min_value=0, value=30, step=1)
+if st.button("Suggest slots"):
     if weight > MAX_SLOT_KG:
         st.error(f"One pallet may weigh at most {MAX_SLOT_KG} kg. Split the product into more pallets.")
     else:
@@ -266,5 +282,6 @@ if submitted:
         res = suggest_placement(dict(type=ptype, allergens=set(allergens), pallets=int(pallets),
                                      days_to_production=int(days)), df)
         st.dataframe(res, hide_index=True, width="stretch")
+        st.caption("Copy an address into the search box on the left to see the slot on the map.")
         if len(res) < pallets:
             st.warning("Not enough suitable free slots in the known rows.")
