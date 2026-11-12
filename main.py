@@ -1,5 +1,4 @@
 import re
-
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -8,7 +7,7 @@ LEVELS = 6
 SLOT_DX = {"a": -0.3, "b": 0.0, "c": 0.3}
 EMPTY_FILL, EMPTY_LINE = "#d9dee4", "#98a3af"
 FALLBACK_COLOR = "#8a8f95"
-PRODUCTS = {  # code:(name, color) streamlit run main.py
+PRODUCTS = {  
     "2261410A": ("Pritt Color Stick Orange 15000×10g", "#e07b2c"),
     "1173983": ("ACCO PP STATICMIXER INJECTION", "#7a5fc4"),
     "2675905": ("PKU6K Pritt Stick 8300×22g UK", "#2a8f6f"),
@@ -31,11 +30,11 @@ COLUMN_NAMES = {"address": "Location", "code": "Item code", "name": "Product",
                 "qty": "Quantity (pcs)", "doc": "Document", "batch": "Batch"}
 
 # --- placement rules (CHECK THESE VALUES WITH THE WAREHOUSE) ---
-MAX_SLOT_KG = 750  # assumed 750 kg per slot
-HORIZON_DAYS = 84  # orders are planned 12 weeks ahead
-ROW_STEP_M, COL_STEP_M, LEVEL_STEP_M = 3.5, 2.8, 1.3  # row spacing and level height are assumptions
-DOCK_ROW, DOCK_COL = 2, 16  # CHANGE: row and column next to the buffer / dispatch area
-ZONE_ROWS = {}  # e.g. {"food": ["K-010", "K-011"]}; empty means no restriction
+MAX_SLOT_KG = 750  
+HORIZON_DAYS = 84  
+ROW_STEP_M, COL_STEP_M, LEVEL_STEP_M = 3.5, 2.8, 1.3  # row spacing and level height
+DOCK_ROW, DOCK_COL = 2, 16  # row and column next to the buffer 
+ZONE_ROWS = {}  
 ALLERGEN_LIST = ["soy", "nuts", "milk", "gluten", "eggs"]
 TYPES = ["industry", "food", "chemical", "packaging", "other"]
 
