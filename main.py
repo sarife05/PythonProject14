@@ -6,7 +6,7 @@ LEVELS = 6
 SLOT_DX = {"a": -0.3, "b": 0.0, "c": 0.3}
 EMPTY_FILL, EMPTY_LINE = "#d9dee4", "#98a3af"
 FALLBACK_COLOR = "#8a8f95"
-PRODUCTS = {  # code:(name, color)
+PRODUCTS = {
     "2261410A": ("Pritt Color Stick Orange 15000×10g", "#e07b2c"),
     "1173983": ("ACCO PP STATICMIXER INJECTION", "#7a5fc4"),
     "2675905": ("PKU6K Pritt Stick 8300×22g UK", "#2a8f6f"),
@@ -29,6 +29,15 @@ COLUMN_NAMES = {"address": "Location", "code": "Item code", "name": "Product",
                 "qty": "Quantity (pcs)", "doc": "Document", "batch": "Batch"}
 
 
+MAX_SLOT_KG = 750
+HORIZON_DAYS = 84  # 12 weeks ahead
+ROW_STEP_M, COL_STEP_M, LEVEL_STEP_M = 3.5, 2.8, 1.3  # assumptions
+DOCK_ROW, DOCK_COL = 2, 16
+ZONE_ROWS = {}
+ALLERGEN_LIST = ["soy", "nuts", "milk", "gluten", "eggs"]
+TYPES = ["industry", "food", "chemical", "packaging", "other"]
+
+
 @st.cache_data
 def load_pallets() -> pd.DataFrame:
 # need replacement
@@ -49,11 +58,69 @@ def load_pallets() -> pd.DataFrame:
 
     df = pd.DataFrame(data)
     p = df["address"].str.split("-", expand=True)  # K-008-027-003-b
-    df["row_id"] = p[0] + "-" + p[1]  # zone + row
-    df["bay"] = p[2].astype(int)
+    df["row_id"] = p[0] + "-" + p[1]  # warehouse + row
+    df["bay"] = p[2].astype(int)  # rack column
     df["name"] = df["code"].map(lambda c: PRODUCTS.get(c, (c, FALLBACK_COLOR))[0])
     df["color"] = df["code"].map(lambda c: PRODUCTS.get(c, (c, FALLBACK_COLOR))[1])
+    df["type"] = "unknown"  # fill from the questionnaire or the backend
+    df["allergens"] = [frozenset() for _ in range(len(df))]
+    df["weight_kg"] = None
     return df
+
+
+def slot_distance(addr: str) -> float:
+    """Approximate distance (m) from the dock to a slot."""
+    _, row, col, level, _ = addr.split("-")
+    return (abs(int(row) - DOCK_ROW) * ROW_STEP_M + abs(int(col) - DOCK_COL) * COL_STEP_M
+            + (int(level) - 1) * LEVEL_STEP_M)
+
+
+def neighbours(addr: str) -> list:
+    """Slots next to addr: same level (other slots, columns +-1) and levels +-1 in the same column."""
+    z, row, col, lvl, s = addr.split("-")
+    col, lvl = int(col), int(lvl)
+    out = [f"{z}-{row}-{col:03d}-{lvl:03d}-{x}" for x in "abc" if x != s]
+    for d in (-1, 1):
+        out += [f"{z}-{row}-{col + d:03d}-{lvl:03d}-{x}" for x in "abc"]
+        out += [f"{z}-{row}-{col:03d}-{lvl + d:03d}-{x}" for x in "abc"]
+    return out
+
+
+def allergen_conflict(addr: str, allergens: frozenset, occupied: dict) -> bool:
+    for n in neighbours(addr):
+        o = occupied.get(n)
+        if o and o["food"] and (o["allergens"] or allergens) and o["allergens"] != allergens:
+            return True
+    return False
+
+
+def free_slots(df: pd.DataFrame) -> list:
+    taken = set(df["address"])
+    out = []
+    for row_id, sub_ in df.groupby("row_id"):
+        for c in range(max(1, sub_["bay"].min() - 2), sub_["bay"].max() + 3):
+            for lvl in range(1, LEVELS + 1):
+                for s in "abc":
+                    a = f"{row_id}-{c:03d}-{lvl:03d}-{s}"
+                    if a not in taken:
+                        out.append(a)
+    return sorted(out, key=slot_distance)
+
+
+def suggest_placement(item: dict, df: pd.DataFrame) -> pd.DataFrame:
+    """item: dict with type, allergens (set), pallets, days_to_production."""
+    occupied = {r.address: {"food": r.type == "food", "allergens": frozenset(r.allergens)}
+                for r in df.itertuples()}
+    allergens, food = frozenset(item["allergens"]), item["type"] == "food"
+    allowed_rows = ZONE_ROWS.get(item["type"])
+    ok = [a for a in free_slots(df)
+          if (not allowed_rows or a[:5] in allowed_rows)
+          and not (food and allergen_conflict(a, allergens, occupied))]
+    # 0 days -> nearest allowed slots, 84 days or more -> farthest allowed slots
+    share = min(item["days_to_production"], HORIZON_DAYS) / HORIZON_DAYS
+    start = int(share * max(0, len(ok) - item["pallets"]))
+    return pd.DataFrame([{"address": a, "distance_m": round(slot_distance(a), 1)}
+                         for a in ok[start:start + item["pallets"]]])
 
 
 def address_from_click(row_id: str, x: float, y: float) -> str:
@@ -106,7 +173,7 @@ def rack_figure(sub: pd.DataFrame, row_id: str, lo: int, hi: int, hits: set, pic
         clickmode="event+select", dragmode=False, showlegend=False,
         xaxis=dict(tickmode="array", tickvals=list(range(lo, hi + 1)),
                    ticktext=[f"{b:03d}" for b in range(lo, hi + 1)], range=[lo - 0.6, hi + 0.6],
-                   fixedrange=True, showgrid=False, zeroline=False, title="Bay"),
+                   fixedrange=True, showgrid=False, zeroline=False, title="Column"),
         yaxis=dict(tickmode="array", tickvals=list(range(1, LEVELS + 1)),
                    ticktext=[f"Level {l}" for l in range(1, LEVELS + 1)], range=[0.4, LEVELS + 0.6],
                    fixedrange=True, showgrid=False, zeroline=False),
@@ -151,7 +218,7 @@ sub = df[df["row_id"] == current]
 lo, hi = max(1, sub["bay"].min() - 2), sub["bay"].max() + 2
 total = (hi - lo + 1) * LEVELS * 3
 occupied = sub["address"].nunique()
-st.caption(f"Row {current}, bays {lo}–{hi}. Occupied {occupied} of {total} slots ({occupied / total:.0%}). "
+st.caption(f"Row {current}, columns {lo}–{hi}. Occupied {occupied} of {total} slots ({occupied / total:.0%}). "
            "Click any slot, empty or occupied, to see its details.")
 
 key = f"rack_{current}"
@@ -166,7 +233,7 @@ if picked:
     st.subheader(f"Slot {picked}")
     zone, row, bay, level, slot = picked.split("-")
     here = df[df["address"] == picked]
-    info = pd.DataFrame([{"Zone": zone, "Row": row, "Bay": bay, "Level": int(level), "Slot": slot,
+    info = pd.DataFrame([{"Warehouse": zone, "Row": row, "Column": bay, "Level": int(level), "Slot": slot,
                           "Max load": "750 kg", "Status": "Occupied" if len(here) else "Empty"}])
     st.dataframe(info, hide_index=True, width="stretch")
     if len(here):
@@ -179,3 +246,25 @@ if hits:
     st.subheader("Search results")
     st.dataframe(found[list(COLUMN_NAMES)].rename(columns=COLUMN_NAMES).replace({"Batch": {"": "no data"}}),
                  hide_index=True, width="stretch")
+
+st.subheader("New product: quick questionnaire")
+with st.form("new_product"):
+    new_code = st.text_input("Item code")
+    weight = st.number_input("Weight of one pallet (kg)", min_value=0.0, value=500.0)
+    ptype = st.selectbox("Type of product", TYPES)
+    allergens = st.multiselect("Contains allergens", ALLERGEN_LIST)
+    pallets = st.number_input("Number of pallets", min_value=1, value=1, step=1)
+    days = st.number_input("Days until production", min_value=0, value=30, step=1)
+    submitted = st.form_submit_button("Suggest slots")
+if submitted:
+    if weight > MAX_SLOT_KG:
+        st.error(f"One pallet may weigh at most {MAX_SLOT_KG} kg. Split the product into more pallets.")
+    else:
+        # prototype: the answers are kept only for this browser session
+        st.session_state.setdefault("catalog", {})[new_code] = dict(
+            weight_kg=weight, type=ptype, allergens=allergens)
+        res = suggest_placement(dict(type=ptype, allergens=set(allergens), pallets=int(pallets),
+                                     days_to_production=int(days)), df)
+        st.dataframe(res, hide_index=True, width="stretch")
+        if len(res) < pallets:
+            st.warning("Not enough suitable free slots in the known rows.")
