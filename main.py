@@ -1,4 +1,5 @@
 import re
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -7,7 +8,7 @@ LEVELS = 6
 SLOT_DX = {"a": -0.3, "b": 0.0, "c": 0.3}
 EMPTY_FILL, EMPTY_LINE = "#d9dee4", "#98a3af"
 FALLBACK_COLOR = "#8a8f95"
-PRODUCTS = {  
+PRODUCTS = {  # code:(name, color) streamlit run main.py
     "2261410A": ("Pritt Color Stick Orange 15000×10g", "#e07b2c"),
     "1173983": ("ACCO PP STATICMIXER INJECTION", "#7a5fc4"),
     "2675905": ("PKU6K Pritt Stick 8300×22g UK", "#2a8f6f"),
@@ -30,11 +31,11 @@ COLUMN_NAMES = {"address": "Location", "code": "Item code", "name": "Product",
                 "qty": "Quantity (pcs)", "doc": "Document", "batch": "Batch"}
 
 # --- placement rules (CHECK THESE VALUES WITH THE WAREHOUSE) ---
-MAX_SLOT_KG = 750  
-HORIZON_DAYS = 84  
-ROW_STEP_M, COL_STEP_M, LEVEL_STEP_M = 3.5, 2.8, 1.3  # row spacing and level height
-DOCK_ROW, DOCK_COL = 2, 16  # row and column next to the buffer 
-ZONE_ROWS = {}  
+MAX_SLOT_KG = 750  # assumed 750 kg per slot
+HORIZON_DAYS = 84  # orders are planned 12 weeks ahead
+ROW_STEP_M, COL_STEP_M, LEVEL_STEP_M = 3.5, 2.8, 1.3  # row spacing and level height are assumptions
+DOCK_ROW, DOCK_COL = 2, 16  # CHANGE: row and column next to the buffer / dispatch area
+ZONE_ROWS = {}  # e.g. {"food": ["K-010", "K-011"]}; empty means no restriction
 ALLERGEN_LIST = ["soy", "nuts", "milk", "gluten", "eggs"]
 TYPES = ["industry", "food", "chemical", "packaging", "other"]
 
@@ -186,7 +187,8 @@ st.set_page_config(page_title="Hillwood Warehouse", layout="wide")
 st.title("Warehouse")
 
 df = load_pallets()
-q = st.sidebar.text_input("Search", placeholder="location, batch, item code or product name").strip().lower()
+q = st.sidebar.text_input("Search", placeholder="location, batch, item code or product name",
+                          key="search").strip().lower()
 ADDR_RE = re.compile(r"^[a-z]-\d{3}-\d{3}-\d{3}-[abc]$")  # e.g. k-006-026-002-a
 hits, found, first_row = set(), pd.DataFrame(), None
 if q:
@@ -203,6 +205,42 @@ if q:
         st.sidebar.write("This slot is empty (no pallet stored here)")
     else:
         st.sidebar.write("Nothing found")
+
+def go_to(addr: str):
+    """Button callback: put the address into the search box, the page then jumps to that slot."""
+    st.session_state["search"] = addr
+
+
+st.sidebar.subheader("New product")
+new_code = st.sidebar.text_input("Item code")
+ptype = st.sidebar.selectbox("Type of product", TYPES)
+weight = st.sidebar.number_input("Weight of one pallet (kg)", min_value=0.0, value=500.0)
+allergens = []
+if ptype == "food":  # allergens matter only for food
+    chosen = st.sidebar.multiselect("Contains allergens", ALLERGEN_LIST)
+    other = st.sidebar.text_input("Other allergens (comma-separated)", placeholder="e.g. sesame, celery")
+    allergens = chosen + [a.strip().lower() for a in other.split(",") if a.strip()]
+pallets = st.sidebar.number_input("Number of pallets", min_value=1, value=1, step=1)
+days = st.sidebar.number_input("Days until production", min_value=0, value=30, step=1)
+if st.sidebar.button("Suggest slots"):
+    if weight > MAX_SLOT_KG:
+        st.session_state.pop("suggestion", None)
+        st.sidebar.error(f"One pallet may weigh at most {MAX_SLOT_KG} kg. Split the product into more pallets.")
+    else:
+        # prototype: the answers are kept only for this browser session
+        st.session_state.setdefault("catalog", {})[new_code] = dict(
+            weight_kg=weight, type=ptype, allergens=allergens)
+        st.session_state["suggestion"] = suggest_placement(
+            dict(type=ptype, allergens=set(allergens), pallets=int(pallets),
+                 days_to_production=int(days)), df)
+        st.session_state["wanted"] = int(pallets)
+suggestion = st.session_state.get("suggestion")
+if suggestion is not None:
+    st.sidebar.markdown("**Suggested slots** (click one to show it on the map)")
+    for a, d in zip(suggestion["address"], suggestion["distance_m"]):
+        st.sidebar.button(f"{a}  ·  {d} m", key=f"go_{a}", on_click=go_to, args=(a,))
+    if len(suggestion) < st.session_state.get("wanted", 0):
+        st.sidebar.warning("Not enough suitable free slots in the known rows.")
 
 st.sidebar.markdown("**Legend**")
 for code, (name, color) in PRODUCTS.items():
@@ -261,26 +299,3 @@ if len(found):
     st.subheader("Search results")
     st.dataframe(found[list(COLUMN_NAMES)].rename(columns=COLUMN_NAMES).replace({"Batch": {"": "no data"}}),
                  hide_index=True, width="stretch")
-
-st.subheader("New product: quick questionnaire")
-new_code = st.text_input("Item code")
-ptype = st.selectbox("Type of product", TYPES)
-weight = st.number_input("Weight of one pallet (kg)", min_value=0.0, value=500.0)
-allergens = []
-if ptype == "food":  # allergens matter only for food
-    allergens = st.multiselect("Contains allergens", ALLERGEN_LIST)
-pallets = st.number_input("Number of pallets", min_value=1, value=1, step=1)
-days = st.number_input("Days until production", min_value=0, value=30, step=1)
-if st.button("Suggest slots"):
-    if weight > MAX_SLOT_KG:
-        st.error(f"One pallet may weigh at most {MAX_SLOT_KG} kg. Split the product into more pallets.")
-    else:
-        # prototype: the answers are kept only for this browser session
-        st.session_state.setdefault("catalog", {})[new_code] = dict(
-            weight_kg=weight, type=ptype, allergens=allergens)
-        res = suggest_placement(dict(type=ptype, allergens=set(allergens), pallets=int(pallets),
-                                     days_to_production=int(days)), df)
-        st.dataframe(res, hide_index=True, width="stretch")
-        st.caption("Copy an address into the search box on the left to see the slot on the map.")
-        if len(res) < pallets:
-            st.warning("Not enough suitable free slots in the known rows.")
